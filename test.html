@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Kakao 키워드 검색 예제 (데이터베이스 연동)</title>
+    <style>
+        input[type="submit"] {
+            padding: 10px 20px;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+<h1>Kakao 키워드 검색 (데이터베이스 연동)</h1>
+<form id="searchForm">
+    <input type="submit" value="데이터베이스 검색 시작"/>
+</form>
+<p>
+    검색 결과:
+<pre id="searchResult"></pre>
+</p>
+<script src="/index.js"></script>
+<script>
+    const apiKey = 'cb44d60ac03b2347c55e49d7bb147a19';
+    const radius = 100;  // 검색 반경 (100m)
+
+    // 주소에서 도로명 주소 부분 추출
+    function extractRoadAddress(address) {
+        const match = address.match(/^[^,(]+(\s+\d+)*/);
+        return match ? match[0].trim() : '';
+    }
+
+    // 주소로 좌표 검색
+    function searchCoordsByAddress(address) {
+        const url = `https://dapi.kakao.com/v2/local/search/address.json?query=${encodeURIComponent(address)}`;
+        return fetch(url, {
+            headers: {
+                'Authorization': `KakaoAK ${apiKey}`
+            }
+        }).then(response => response.json());
+    }
+
+    // 좌표와 반경을 사용하여 키워드 검색
+    function searchByCoords(x, y, radius, keyword) {
+        const url = `https://dapi.kakao.com/v2/local/search/keyword.json?x=${x}&y=${y}&radius=${radius}&query=${encodeURIComponent(keyword)}`;
+        return fetch(url, {
+            headers: {
+                'Authorization': `KakaoAK ${apiKey}`
+            }
+        }).then(response => response.json());
+    }
+
+    // 두 좌표 사이의 거리 계산
+    function calculateDistance(x1, y1, x2, y2) {
+        return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+    }
+
+    // 키워드 검색 함수
+    function searchByKeyword(x, y, radius, keyword, index = 1) {
+        if (index > keyword.length) {
+            throw new Error('검색 결과가 없습니다.');
+        }
+
+        if (keyword[index - 1] === ' ') {
+            return searchByKeyword(x, y, radius, keyword, index + 1);
+        }
+
+        const searchKeyword = keyword.slice(0, index);
+        console.log(`Searching with keyword: ${searchKeyword}`);
+
+        return searchByCoords(x, y, radius, searchKeyword)
+            .then(data => {
+                if (data.documents.length > 0) {
+                    const place = data.documents.find(doc => doc.category_name.includes('스포츠,레저'));
+                    if (place) {
+                        return place;
+                    } else {
+                        return searchByKeyword(x, y, radius, keyword, index + 1);
+                    }
+                } else {
+                    return searchByKeyword(x, y, radius, keyword, index + 1);
+                }
+            });
+    }
+
+    // 데이터베이스 연결 정보
+    const dbConfig = {
+        host: 'localhost',
+        user: 'root',
+        password: '1234',
+        database: 'training_db'
+    };
+
+    // 데이터베이스 연결
+    function connectToDatabase() {
+        return mysql.createConnection(dbConfig);
+    }
+
+    // 데이터베이스에서 데이터 가져오기
+    function getDataFromDatabase() {
+        const connection = connectToDatabase();
+        const query = 'SELECT staticNum, newAddress, business FROM training_loc WHERE staticNum BETWEEN 1 AND 3774';
+
+        return new Promise((resolve, reject) => {
+            connection.query(query, (error, results) => {
+                if (error) {
+                    reject(error);
+                } else {
+                    resolve(results);
+                }
+                connection.end();
+            });
+        });
+    }
+
+    // 검색 폼 제출 시 실행되는 함수
+    function handleSearch(event) {
+        event.preventDefault();
+
+        // 데이터베이스에서 데이터 가져오기
+        getDataFromDatabase()
+            .then(data => {
+                const noResultNums = [];
+
+                // 각 데이터에 대해 검색 수행
+                const searchPromises = data.map(item => {
+                    const address = item.newAddress;
+                    const keyword = item.business;
+
+                    // 입력된 주소에서 도로명 주소 부분 추출
+                    const roadAddress = extractRoadAddress(address);
+
+                    // 디버깅: 추출된 도로명 주소와 키워드 출력
+                    console.log('Road Address:', roadAddress);
+                    console.log('Keyword:', keyword);
+
+                    // 도로명 주소로 좌표 검색 후, 해당 좌표를 기준으로 가장 가까운 장소 찾기
+                    return searchCoordsByAddress(roadAddress)
+                        .then(data => {
+                            if (data.documents.length > 0) {
+                                const x = data.documents[0].x;
+                                const y = data.documents[0].y;
+                                return searchByKeyword(x, y, radius, keyword);
+                            } else {
+                                throw new Error('주소 검색 결과가 없습니다.');
+                            }
+                        })
+                        .then(nearestPlace => {
+                            console.log('검색 결과:', nearestPlace);
+                        })
+                        .catch(error => {
+                            console.error('Error:', error);
+                            noResultNums.push(item.staticNum);
+                        });
+                });
+
+                // 모든 검색 완료 후 결과 없는 번호 출력
+                Promise.all(searchPromises)
+                    .then(() => {
+                        console.log('검색 결과 없는 번호:', noResultNums);
+                        document.getElementById('searchResult').textContent = '검색 결과 없는 번호: ' + noResultNums.join(', ');
+                    });
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                document.getElementById('searchResult').textContent = error.message;
+            });
+    }
+
+    // 검색 폼 제출 이벤트 리스너 등록
+    document.getElementById('searchForm').addEventListener('submit', handleSearch);
+</script>
+</body>
+</html>
